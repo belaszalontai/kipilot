@@ -6,7 +6,7 @@ The KiCad MCP (Model Context Protocol) Server acts as an intelligent bridge betw
 ## 2. Core Architecture
 - **Client:** VSCode + GitHub Copilot (using MCP client capabilities).
 - **Middleware:** Python-based MCP Server implementing the official Anthropic MCP SDK.
-- **Target:** KiCad 9.0+ running locally with IPC API support. KiCad 9/10 require a running KiCad GUI instance for IPC access.
+- **Target:** KiCad 10.x running locally with IPC API support. KiCad 9/10 require a running KiCad GUI instance for IPC access, but this repository targets the KiCad 10 PCB-first baseline.
 - **Communication Protocol:** 
   - Client <-> MCP Server: stdio / MCP Protocol
   - MCP Server <-> KiCad: official `kicad-python` (`kipy`) binding over KiCad's platform IPC endpoint (named pipe on Windows, Unix domain socket on macOS/Linux)
@@ -63,7 +63,7 @@ See `.github/kicad-api-capabilities.md` for the detailed capability map and the 
 
 ## 5. User Workflow
 1. Developer opens a firmware/hardware project in VSCode.
-2. Developer opens the corresponding board/project in KiCad 9+.
+2. Developer opens the corresponding board/project in KiCad 10.x.
 3. Developer asks Copilot: "List the footprints and nets on the currently open PCB."
 4. Copilot invokes the KiCad MCP Server tool.
 5. The MCP server uses `kicad-python` to call the KiCad IPC API.

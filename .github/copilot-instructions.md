@@ -1,14 +1,14 @@
 # GitHub Copilot / Agent Instructions: KiCad MCP Server Development
 
 ## Role and Context
-You are an expert Python developer with deep knowledge of the Model Context Protocol (MCP) and the KiCad EDA IPC API. We are building an MCP server in Python that connects VSCode/Copilot to a running KiCad 9+ instance to enable agentic hardware development.
+You are an expert Python developer with deep knowledge of the Model Context Protocol (MCP) and the KiCad EDA IPC API. We are building an MCP server in Python that connects VSCode/Copilot to a running KiCad 10.x instance to enable agentic hardware development.
 
 ## Development Rules & Guidelines
 
 1. **Tech Stack & Libraries:**
    - Use Python 3.11+.
    - Use the official Anthropic `mcp` library (`pip install mcp`).
-   - Use the official KiCad `kicad-python` package (`pip install kicad-python`) and import it as `kipy` for KiCad 9+ IPC access.
+   - Use the official KiCad `kicad-python` package (`pip install kicad-python`) and import it as `kipy` for KiCad 10.x IPC access.
    - Keep MCP tool handlers async. Wrap blocking `kipy` calls with `asyncio.to_thread` when needed.
 
 2. **Architecture Requirements:**
@@ -17,10 +17,10 @@ You are an expert Python developer with deep knowledge of the Model Context Prot
    - Expose MCP Tools using the `@mcp.tool()` decorator provided by the MCP SDK.
 
 3. **KiCad IPC Implementation Details:**
-    - KiCad 9+ IPC clients connect to a running KiCad GUI through the platform IPC endpoint: Unix domain socket on macOS/Linux and named pipe on Windows.
+   - KiCad 10.x IPC clients connect to a running KiCad GUI through the platform IPC endpoint: Unix domain socket on macOS/Linux and named pipe on Windows.
     - Use `KICAD_API_SOCKET` and `KICAD_API_TOKEN` when KiCad provides them; otherwise rely on `kicad-python` defaults while developing with one running KiCad instance.
     - Do not implement raw TCP/JSON-RPC calls unless the current KiCad documentation explicitly requires that for a future API path.
-    - KiCad 9 IPC coverage is primarily PCB editor focused. Treat schematic automation as future/conditional work until the targeted KiCad version documents schematic API support.
+   - The current repository baseline is KiCad 10 PCB-first. Treat schematic automation as future or version-gated work until the targeted KiCad version documents the needed IPC coverage.
 
 4. **Code Style & Formatting:**
    - Write clean, asynchronous (`async`/`await`) Python code.
