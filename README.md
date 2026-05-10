@@ -56,8 +56,8 @@ Use a stable CPython release such as 3.11, 3.12, or 3.13. Avoid preview or alpha
 Clone the public repository:
 
 ```powershell
-git clone https://github.com/belaszalontai/kipilot.git
-cd kipilot
+git clone https://github.com/belaszalontai/kipilot-mcp.git
+cd kipilot-mcp
 ```
 
 ### Windows helper

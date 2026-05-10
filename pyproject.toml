@@ -30,9 +30,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://kipilot.org"
-Repository = "https://github.com/belaszalontai/kipilot"
+Repository = "https://github.com/belaszalontai/kipilot-mcp"
 Documentation = "https://kipilot.org/docs.html"
-Issues = "https://github.com/belaszalontai/kipilot/issues"
+Issues = "https://github.com/belaszalontai/kipilot-mcp/issues"
 
 [project.optional-dependencies]
 dev = [
