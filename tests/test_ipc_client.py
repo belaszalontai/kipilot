@@ -758,6 +758,71 @@ async def test_find_footprints_filters_by_reference() -> None:
     }
 
 
+async def test_find_footprints_includes_child_graphics_summary() -> None:
+    class FootprintArtworkBoard(FakeBoard):
+        def get_footprints(self) -> list[FakeMutableFootprint]:
+            return [
+                FakeMutableFootprint(
+                    footprint_id="logo-footprint-id",
+                    reference="LOGO",
+                    value="LOGO",
+                    position=FakeVector(10_000_000, 20_000_000),
+                    orientation=FakeAngle(0),
+                    layer=0,
+                    definition_items=[
+                        FakeMutableBoardPolygon(
+                            shape_id="logo-shape-1",
+                            layer=37,
+                            polygons=[
+                                FakeMutablePolygon(
+                                    outline=[
+                                        FakeVector(9_000_000, 19_000_000),
+                                        FakeVector(11_000_000, 19_000_000),
+                                        FakeVector(11_000_000, 21_000_000),
+                                    ]
+                                )
+                            ],
+                        ),
+                        FakeMutableBoardPolygon(
+                            shape_id="logo-shape-2",
+                            layer=37,
+                            polygons=[
+                                FakeMutablePolygon(
+                                    outline=[
+                                        FakeVector(9_500_000, 19_500_000),
+                                        FakeVector(10_500_000, 19_500_000),
+                                        FakeVector(10_500_000, 20_500_000),
+                                    ]
+                                )
+                            ],
+                        ),
+                    ],
+                )
+            ]
+
+    class FootprintArtworkKiCad(FakeBoardKiCad):
+        def __init__(self, **_kwargs: object) -> None:
+            self.board = FootprintArtworkBoard()
+
+        def get_board(self) -> FootprintArtworkBoard:
+            return self.board
+
+    client = KiCadIpcClient(KiCadIpcConfig(), kicad_factory=FootprintArtworkKiCad)
+
+    result = await client.find_footprints(text_query="LOGO", limit=5)
+
+    assert result["count"] == 1
+    assert result["footprints"][0]["child_graphics"] == {
+        "count": 2,
+        "layers": [
+            {
+                "layer": {"id": 37, "name": "F.SilkS"},
+                "count": 2,
+            }
+        ],
+    }
+
+
 async def test_find_footprints_supports_id_layer_name_and_area_filters() -> None:
     client = KiCadIpcClient(KiCadIpcConfig(), kicad_factory=FakeBoardKiCad)
 
@@ -1686,6 +1751,266 @@ async def test_rotate_footprint_updates_board_when_enabled() -> None:
     ]
 
 
+async def test_flip_footprint_dry_run_previews_opposite_layer() -> None:
+    client = KiCadIpcClient(KiCadIpcConfig(enable_mutations=False), kicad_factory=FakeMutationKiCad)
+
+    result = await client.flip_footprint(reference="R1", dry_run=True)
+
+    assert result == {
+        "ok": True,
+        "mutation": "flip_footprint",
+        "dry_run": True,
+        "commit_message": None,
+        "board": {
+            "name": "demo.kicad_pcb",
+            "document": {
+                "type": "1",
+                "board_filename": "demo.kicad_pcb",
+                "project": {
+                    "name": "demo",
+                    "path": "C:/demo/demo.kicad_pro",
+                },
+            },
+        },
+        "target": {
+            "reference": "R1",
+            "footprint_id": None,
+        },
+        "previous_footprint": {
+            "id": "footprint-id",
+            "reference": "R1",
+            "value": "10k",
+            "position": {
+                "x_nm": 1_500_000,
+                "y_nm": 2_500_000,
+                "x_mm": 1.5,
+                "y_mm": 2.5,
+            },
+            "orientation": "90deg",
+            "layer": 0,
+            "locked": False,
+        },
+        "footprint": {
+            "id": "footprint-id",
+            "reference": "R1",
+            "value": "10k",
+            "position": {
+                "x_nm": 1_500_000,
+                "y_nm": 2_500_000,
+                "x_mm": 1.5,
+                "y_mm": 2.5,
+            },
+            "orientation": "-90deg",
+            "layer": 31,
+            "locked": False,
+        },
+        "previous_layer": {"id": 0, "name": "F.Cu"},
+        "target_layer": {"id": 31, "name": "B.Cu"},
+        "mirrored": True,
+    }
+    assert FakeMutationKiCad.last_instance is not None
+    assert FakeMutationKiCad.last_instance.board.calls == []
+
+
+async def test_flip_footprint_updates_board_when_enabled() -> None:
+    client = KiCadIpcClient(KiCadIpcConfig(enable_mutations=True), kicad_factory=FakeMutationKiCad)
+
+    result = await client.flip_footprint(footprint_id="footprint-id")
+
+    assert result["ok"] is True
+    assert result["mutation"] == "flip_footprint"
+    assert result["dry_run"] is False
+    assert result["commit_message"] == "KiPilot MCP: flip_footprint"
+    assert result["footprint"]["layer"] == 31
+    assert result["target_layer"] == {"id": 31, "name": "B.Cu"}
+    assert FakeMutationKiCad.last_instance is not None
+    assert FakeMutationKiCad.last_instance.board.calls == [
+        ("begin_commit",),
+        ("update_items", ["footprint-id"]),
+        ("push_commit", "fake-commit", "KiPilot MCP: flip_footprint"),
+    ]
+
+
+async def test_flip_footprint_supports_named_copper_layers_with_noncanonical_ids() -> None:
+    class DynamicLayerMutationBoard(FakeMutationBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self._active_layer = 3
+            self._visible_layers = [3, 2, 44]
+            self._enabled_layers = [3, 2, 44]
+            self._footprints[0].layer = 3
+            self._footprints[1].layer = 2
+
+        def get_layer_name(self, layer: int) -> str:
+            names = {
+                2: "B.Cu",
+                3: "F.Cu",
+                36: "B.SilkS",
+                37: "F.SilkS",
+                44: "Edge.Cuts",
+            }
+            return names.get(layer, "")
+
+    class DynamicLayerMutationKiCad(FakeBoardKiCad):
+        last_instance: DynamicLayerMutationKiCad | None = None
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.board = DynamicLayerMutationBoard()
+            type(self).last_instance = self
+
+        def get_board(self) -> DynamicLayerMutationBoard:
+            return self.board
+
+    client = KiCadIpcClient(
+        KiCadIpcConfig(enable_mutations=False),
+        kicad_factory=DynamicLayerMutationKiCad,
+    )
+
+    result = await client.flip_footprint(
+        footprint_id="footprint-id",
+        target_layer="B.Cu",
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert result["previous_layer"] == {"id": 3, "name": "F.Cu"}
+    assert result["target_layer"] == {"id": 2, "name": "B.Cu"}
+    assert result["footprint"]["layer"] == 2
+    assert DynamicLayerMutationKiCad.last_instance is not None
+    assert DynamicLayerMutationKiCad.last_instance.board.calls == []
+
+
+async def test_flip_footprint_dry_run_reports_child_graphics_summary() -> None:
+    class FootprintArtworkMutationBoard(FakeMutationBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self._footprints = [
+                FakeMutableFootprint(
+                    footprint_id="logo-footprint-id",
+                    reference="LOGO",
+                    value="LOGO",
+                    position=FakeVector(10_000_000, 20_000_000),
+                    orientation=FakeAngle(0),
+                    layer=0,
+                    definition_items=[
+                        FakeMutableBoardPolygon(
+                            shape_id="logo-shape-1",
+                            layer=37,
+                            polygons=[
+                                FakeMutablePolygon(
+                                    outline=[
+                                        FakeVector(9_000_000, 19_000_000),
+                                        FakeVector(11_000_000, 19_000_000),
+                                        FakeVector(11_000_000, 21_000_000),
+                                    ]
+                                )
+                            ],
+                        ),
+                        FakeMutableBoardPolygon(
+                            shape_id="logo-shape-2",
+                            layer=37,
+                            polygons=[
+                                FakeMutablePolygon(
+                                    outline=[
+                                        FakeVector(9_500_000, 19_500_000),
+                                        FakeVector(10_500_000, 19_500_000),
+                                        FakeVector(10_500_000, 20_500_000),
+                                    ]
+                                )
+                            ],
+                        ),
+                    ],
+                )
+            ]
+
+    class FootprintArtworkMutationKiCad(FakeBoardKiCad):
+        def __init__(self, **_kwargs: object) -> None:
+            self.board = FootprintArtworkMutationBoard()
+
+        def get_board(self) -> FootprintArtworkMutationBoard:
+            return self.board
+
+    client = KiCadIpcClient(
+        KiCadIpcConfig(enable_mutations=False),
+        kicad_factory=FootprintArtworkMutationKiCad,
+    )
+
+    result = await client.flip_footprint(
+        footprint_id="logo-footprint-id",
+        target_layer="B.Cu",
+        dry_run=True,
+    )
+
+    assert result["mirrored"] is True
+    assert result["previous_footprint"]["child_graphics"] == {
+        "count": 2,
+        "layers": [
+            {
+                "layer": {"id": 37, "name": "F.SilkS"},
+                "count": 2,
+            }
+        ],
+    }
+    assert result["footprint"]["child_graphics"] == {
+        "count": 2,
+        "layers": [
+            {
+                "layer": {"id": 36, "name": "B.SilkS"},
+                "count": 2,
+            }
+        ],
+    }
+
+
+def test_apply_footprint_side_flip_mirrors_graphic_children_and_fields() -> None:
+    client = KiCadIpcClient(KiCadIpcConfig(enable_mutations=False), kicad_factory=FakeMutationKiCad)
+    board = FakeMutationBoard()
+    footprint = FakeMutableFootprint(
+        footprint_id="logo-footprint-id",
+        reference="LOGO",
+        value="LOGO",
+        position=FakeVector(10_000_000, 20_000_000),
+        orientation=FakeAngle(90),
+        layer=0,
+        definition_items=[
+            FakeMutableBoardPolygon(
+                shape_id="logo-shape-id",
+                layer=37,
+                polygons=[
+                    FakeMutablePolygon(
+                        outline=[
+                            FakeVector(9_000_000, 19_000_000),
+                            FakeVector(11_000_000, 19_000_000),
+                            FakeVector(11_000_000, 21_000_000),
+                        ]
+                    )
+                ],
+            )
+        ],
+    )
+    footprint.reference_field.text.position = FakeVector(12_000_000, 21_000_000)
+    footprint.reference_field.text.layer = 37
+    footprint.reference_field.text.attributes = FakeTextAttributes(angle=0.0, mirrored=False)
+
+    did_flip = client._apply_footprint_side_flip(board, footprint, target_layer=31)
+
+    assert did_flip is True
+    assert str(footprint.orientation) == "-90deg"
+    assert footprint.layer == 31
+    assert footprint.reference_field.text.position.x == 8_000_000
+    assert footprint.reference_field.text.position.y == 21_000_000
+    assert footprint.reference_field.text.layer == 36
+    assert footprint.reference_field.text.attributes.mirrored is True
+
+    polygon = footprint.definition.items[0]
+    assert polygon.layer == 36
+    assert [(point.x, point.y) for point in polygon.polygons[0].outline] == [
+        (11_000_000, 19_000_000),
+        (9_000_000, 19_000_000),
+        (9_000_000, 21_000_000),
+    ]
+
+
 async def test_set_board_origin_dry_run_previews_target_origin() -> None:
     client = KiCadIpcClient(KiCadIpcConfig(enable_mutations=False), kicad_factory=FakeMutationKiCad)
 
@@ -2049,6 +2374,7 @@ async def test_update_items_dry_run_previews_whitelisted_updates() -> None:
                 "x_mm": 2.0,
                 "y_mm": 3.0,
                 "orientation_degrees": 45,
+                "layer": "B.Cu",
             },
             {
                 "kind": "track",
@@ -2082,6 +2408,8 @@ async def test_update_items_dry_run_previews_whitelisted_updates() -> None:
         "y_mm": 3.0,
     }
     assert result["updates"][0]["item"]["orientation"] == "45deg"
+    assert result["updates"][0]["item"]["layer"] == 31
+    assert result["updates"][0]["requested_changes"]["layer"] == {"id": 31, "name": "B.Cu"}
     assert result["updates"][1]["item"]["end"] == {
         "x_nm": 8_000_000,
         "y_nm": 2_500_000,
@@ -2094,6 +2422,25 @@ async def test_update_items_dry_run_previews_whitelisted_updates() -> None:
     assert FakeMutationKiCad.last_instance.board.calls == []
 
 
+async def test_update_items_footprint_layer_change_flips_orientation() -> None:
+    client = KiCadIpcClient(KiCadIpcConfig(enable_mutations=False), kicad_factory=FakeMutationKiCad)
+
+    result = await client.update_items(
+        updates=[
+            {
+                "kind": "footprint",
+                "reference": "R1",
+                "layer": "B.Cu",
+            }
+        ],
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert result["updates"][0]["item"]["layer"] == 31
+    assert result["updates"][0]["item"]["orientation"] == "-90deg"
+
+
 async def test_update_items_updates_multiple_items_when_enabled() -> None:
     client = KiCadIpcClient(KiCadIpcConfig(enable_mutations=True), kicad_factory=FakeMutationKiCad)
 
@@ -2103,6 +2450,7 @@ async def test_update_items_updates_multiple_items_when_enabled() -> None:
                 "kind": "footprint",
                 "footprint_id": "footprint-id",
                 "orientation_degrees": 45,
+                "layer": 31,
             },
             {
                 "kind": "track",
@@ -2115,6 +2463,7 @@ async def test_update_items_updates_multiple_items_when_enabled() -> None:
     assert result["ok"] is True
     assert result["mutation"] == "update_items"
     assert result["updates"][0]["item"]["orientation"] == "45deg"
+    assert result["updates"][0]["item"]["layer"] == 31
     assert result["updates"][1]["item"]["locked"] is True
     assert FakeMutationKiCad.last_instance is not None
     assert FakeMutationKiCad.last_instance.board.calls == [
@@ -3190,7 +3539,12 @@ class FakeMutableFootprint:
         orientation: FakeAngle | None = None,
         layer: int = 0,
         locked: bool = False,
+        definition_items: list[object] | None = None,
     ) -> None:
+        reference_field = None
+        value_field = None
+        datasheet_field = None
+        description_field = None
         if proto is not None:
             footprint_id = proto.id
             reference = str(proto.reference_field.text.value)
@@ -3199,14 +3553,25 @@ class FakeMutableFootprint:
             orientation = FakeAngle(proto.orientation.degrees)
             layer = proto.layer
             locked = proto.locked
+            reference_field = getattr(proto, "reference_field", None)
+            value_field = getattr(proto, "value_field", None)
+            datasheet_field = getattr(proto, "datasheet_field", None)
+            description_field = getattr(proto, "description_field", None)
+            definition_items = [
+                _clone_fake_wrapper(item)
+                for item in getattr(getattr(proto, "definition", None), "items", [])
+            ]
 
         self.id = footprint_id
-        self.reference_field = _make_fake_field(reference)
-        self.value_field = _make_fake_field(value)
+        self.reference_field = _make_fake_field(reference, proto=reference_field)
+        self.value_field = _make_fake_field(value, proto=value_field)
+        self.datasheet_field = _make_fake_field(proto=datasheet_field)
+        self.description_field = _make_fake_field(proto=description_field)
         self.position = position or FakeVector(0, 0)
         self.orientation = orientation or FakeAngle(0)
         self.layer = layer
         self.locked = locked
+        self.definition = FakeFootprintDefinition(items=definition_items)
         self.proto = self
 
 
@@ -3287,9 +3652,27 @@ class FakeMutableVia:
 
 
 class FakeMutablePolygon:
-    def __init__(self, outline: list[FakeVector] | None = None) -> None:
+    def __init__(
+        self,
+        proto: FakeMutablePolygon | None = None,
+        *,
+        outline: list[FakeVector] | None = None,
+        holes: list[list[FakeVector]] | None = None,
+    ) -> None:
+        if proto is not None:
+            outline = [
+                cloned
+                for point in getattr(proto, "outline", [])
+                if (cloned := _clone_vector(point)) is not None
+            ]
+            holes = [
+                [cloned for point in hole if (cloned := _clone_vector(point)) is not None]
+                for hole in getattr(proto, "holes", [])
+            ]
+
         self.outline = list(outline or [])
-        self.holes: list[list[FakeVector]] = []
+        self.holes = [list(hole) for hole in holes or []]
+        self.proto = self
 
 
 class FakeMutableZone:
@@ -3347,11 +3730,14 @@ class FakeTextAttributes:
         proto: FakeTextAttributes | None = None,
         *,
         angle: float = 0.0,
+        mirrored: bool = False,
     ) -> None:
         if proto is not None:
             angle = proto.angle
+            mirrored = getattr(proto, "mirrored", mirrored)
 
         self.angle = float(angle)
+        self.mirrored = bool(mirrored)
         self.proto = self
 
 
@@ -3416,12 +3802,80 @@ class FakeMutableBoardTextBox:
         self.proto = self
 
 
-def _make_fake_field(value: str) -> object:
-    return type(
-        "FakeField",
-        (),
-        {"text": type("FakeText", (), {"value": value})()},
-    )()
+class FakeMutableBoardPolygon:
+    def __init__(
+        self,
+        proto: FakeMutableBoardPolygon | None = None,
+        *,
+        shape_id: str = "board-polygon-id",
+        layer: int = 37,
+        polygons: list[FakeMutablePolygon] | None = None,
+        locked: bool = False,
+    ) -> None:
+        if proto is not None:
+            shape_id = str(getattr(proto, "id", shape_id))
+            layer = getattr(proto, "layer", layer)
+            polygons = [FakeMutablePolygon(polygon) for polygon in getattr(proto, "polygons", [])]
+            locked = getattr(proto, "locked", locked)
+
+        self.id = shape_id
+        self.layer = layer
+        self.polygons = list(polygons or [])
+        self.locked = locked
+        self.proto = self
+
+
+class FakeFootprintDefinition:
+    def __init__(
+        self,
+        proto: FakeFootprintDefinition | None = None,
+        *,
+        items: list[object] | None = None,
+    ) -> None:
+        if proto is not None:
+            items = [_clone_fake_wrapper(item) for item in getattr(proto, "items", [])]
+
+        self.items = list(items or [])
+        self.proto = self
+
+
+def _make_fake_field(
+    value: str = "",
+    proto: object | None = None,
+    *,
+    layer: int = 37,
+    position: FakeVector | None = None,
+    angle: float = 0.0,
+    mirrored: bool = False,
+) -> object:
+    attributes = FakeTextAttributes(angle=angle, mirrored=mirrored)
+    visible = True
+    if proto is not None:
+        text = getattr(proto, "text", None)
+        value = str(getattr(text, "value", value))
+        layer = getattr(text, "layer", layer)
+        position = _clone_vector(getattr(text, "position", None))
+        attributes = FakeTextAttributes(getattr(text, "attributes", None))
+        visible = bool(getattr(proto, "visible", visible))
+
+    field = type("FakeField", (), {})()
+    field.text = FakeMutableBoardText(
+        value=value,
+        layer=layer,
+        position=position,
+        attributes=attributes,
+    )
+    field.visible = visible
+    field.proto = field
+    return field
+
+
+def _clone_fake_wrapper(value: object) -> object:
+    proto = getattr(value, "proto", value)
+    try:
+        return type(value)(proto)
+    except Exception:
+        return value
 
 
 def _clone_vector(vector: object | None) -> FakeVector | None:

@@ -19,9 +19,12 @@ KiPilot exists to let an MCP client inspect and manipulate the PCB that is alrea
 - Uses the official KiCad IPC path through `kicad-python`
 - Runs as a `stdio` MCP server for VS Code and similar hosts
 - Supports read-heavy PCB workflows plus guarded mutation tools
+- Adds selected higher-level MCP helpers on top of raw IPC primitives, such as a real footprint side-flip workflow that mirrors child artwork and swaps paired layers
 - Keeps KiCad as a separate, user-launched GUI application
 
 This repository targets the KiCad 10 PCB-first baseline. It does not aim to be a 1:1 wrapper over every public method exposed by the KiCad Python binding.
+
+Where the raw IPC surface does not expose a single native operation but the underlying board objects are still mutable, KiPilot may provide a higher-level MCP tool that composes those lower-level capabilities into one agent-friendly action. The current example is `kicad_flip_footprint`, which performs a real mirrored side flip even though the KiCad binding does not expose one direct footprint-flip call.
 
 ## Current Scope
 
@@ -32,7 +35,7 @@ Implemented MCP surface includes:
 - Connectivity and version checks such as `ping_kicad` and `get_kicad_version`
 - Board and document inspection tools for open documents, outlines, stackup, footprints, nets, pads, tracks, vias, zones, graphics, text, origins, title blocks, and connectivity
 - Filtered lookup tools for footprints, nets, net classes, and connected items
-- Guarded mutation tools for visible layers, active layer, enabled layers, origins, title block fields, board text, track creation, via creation, item updates, track geometry, zone outlines, item deletion, zone refill, board revert, and board save
+- Guarded mutation tools for visible layers, active layer, enabled layers, footprint move/rotate/flip, origins, title block fields, board text, track creation, via creation, item updates, track geometry, zone outlines, item deletion, zone refill, board revert, and board save
 - Unit tests for IPC connection and error-handling behavior
 
 Committed baseline:

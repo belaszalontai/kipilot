@@ -152,6 +152,10 @@ Summarize the currently open PCB and list the first ten footprints.
 Find footprint R1 and preview moving it to x=42.0 mm, y=18.5 mm.
 ```
 
+```text
+Use the KiCad MCP tools to find the footprint whose value is LOGO. Report which copper side it is currently on, then flip it to the opposite side. After the operation, verify that the footprint side changed and that any child artwork moved onto the mirrored side-specific silkscreen layer. If live writes are disabled, do the same flow as a dry run and say that explicitly.
+```
+
 ## Default Safety Behavior
 
 This test workspace is intentionally conservative:
@@ -213,4 +217,10 @@ It also logs to `stderr`, which is useful when you manually run the server proce
 
 ```text
 Use the KiCad MCP tools to verify the connection, report the KiCad version, then summarize the open board. If a write would be needed, stay in dry-run mode and say so explicitly.
+```
+
+## Suggested Flip Test Prompt
+
+```text
+Use the KiCad MCP tools to find the footprint whose value is LOGO. Explain whether it is currently on F.Cu or B.Cu, then flip it to the opposite copper side. After the tool call, verify the resulting footprint layer and confirm that the footprint-internal artwork moved to the mirrored side-specific silkscreen layer. If live writes are disabled, run the same test as a dry run and call that out explicitly.
 ```

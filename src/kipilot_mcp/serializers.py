@@ -252,9 +252,9 @@ def serialize_net_class(net_class: Any) -> dict[str, Any] | None:
     return result
 
 
-def serialize_footprint(footprint: Any) -> dict[str, Any]:
+def serialize_footprint(footprint: Any, board: Any | None = None) -> dict[str, Any]:
     orientation = getattr(footprint, "orientation", None)
-    return {
+    result = {
         "id": serialize_identifier(getattr(footprint, "id", "")),
         "reference": field_text(getattr(footprint, "reference_field", None)),
         "value": field_text(getattr(footprint, "value_field", None)),
@@ -263,6 +263,65 @@ def serialize_footprint(footprint: Any) -> dict[str, Any]:
         "layer": getattr(footprint, "layer", None),
         "locked": getattr(footprint, "locked", None),
     }
+
+    child_graphics = serialize_footprint_child_graphics(footprint, board)
+    if child_graphics is not None:
+        result["child_graphics"] = child_graphics
+
+    return result
+
+
+def serialize_footprint_child_graphics(
+    footprint: Any,
+    board: Any | None = None,
+) -> dict[str, Any] | None:
+    definition = getattr(footprint, "definition", None)
+    if definition is None:
+        return None
+
+    layer_counts: dict[Any, int] = {}
+    graphic_item_count = 0
+    for item in _as_sequence(getattr(definition, "items", [])):
+        child_layers = _get_footprint_child_layers(item)
+        if not child_layers:
+            continue
+
+        graphic_item_count += 1
+        for layer in child_layers:
+            layer_counts[layer] = layer_counts.get(layer, 0) + 1
+
+    if graphic_item_count == 0:
+        return None
+
+    return {
+        "count": graphic_item_count,
+        "layers": [
+            {
+                "layer": serialize_layer(layer, board),
+                "count": count,
+            }
+            for layer, count in layer_counts.items()
+        ],
+    }
+
+
+def _get_footprint_child_layers(item: Any) -> list[Any]:
+    if item is None:
+        return []
+
+    if hasattr(item, "number") and hasattr(item, "padstack"):
+        return []
+
+    if type(item).__name__ == "Field":
+        item = getattr(item, "text", None)
+        if item is None:
+            return []
+
+    layer = getattr(item, "layer", None)
+    if layer is not None:
+        return [layer]
+
+    return [layer_id for layer_id in _as_sequence(getattr(item, "layers", [])) if layer_id is not None]
 
 
 def serialize_track(track: Any, board: Any | None = None) -> dict[str, Any]:
@@ -454,7 +513,7 @@ def serialize_identifier(value: Any) -> str:
 
 def serialize_item(item: Any, board: Any | None = None) -> dict[str, Any]:
     if hasattr(item, "reference_field"):
-        result = serialize_footprint(item)
+        result = serialize_footprint(item, board)
         result["kind"] = type(item).__name__
         return result
 

@@ -83,6 +83,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from kipy import KiCad  # type: ignore[import-not-found]
+    from kipy.board_types import to_concrete_board_shape as kipy_to_concrete_board_shape  # type: ignore[import-not-found]
     from kipy.board_types import Track as KiCadTrack  # type: ignore[import-not-found]
     from kipy.board_types import Via as KiCadVia  # type: ignore[import-not-found]
     from kipy.errors import ApiError  # type: ignore[import-not-found]
@@ -96,6 +97,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on local enviro
     KiCad = None
     KiCadTrack = None
     KiCadVia = None
+    kipy_to_concrete_board_shape = None
     KiCadPolyLine = None
     KiCadPolyLineNode = None
     KiCadPolygonWithHoles = None
@@ -565,6 +567,31 @@ class KiCadIpcClient:
             ),
             default_message="Unable to rotate the requested footprint through the IPC API.",
             mutation_name="rotate_footprint",
+            dry_run=dry_run,
+            commit_message=commit_message,
+        )
+
+    async def flip_footprint(
+        self,
+        *,
+        reference: str | None = None,
+        footprint_id: str | None = None,
+        target_layer: int | str | None = None,
+        dry_run: bool = False,
+        commit_message: str | None = None,
+    ) -> dict[str, Any]:
+        """Flip a footprint instance to the opposite board side."""
+
+        return await self._run_board_write(
+            lambda board, is_dry_run: self._flip_footprint(
+                board,
+                reference=reference,
+                footprint_id=footprint_id,
+                target_layer=target_layer,
+                dry_run=is_dry_run,
+            ),
+            default_message="Unable to flip the requested footprint through the IPC API.",
+            mutation_name="flip_footprint",
             dry_run=dry_run,
             commit_message=commit_message,
         )
@@ -1177,7 +1204,7 @@ class KiCadIpcClient:
             "ok": True,
             "count": len(footprints),
             "limit": limit,
-            "footprints": [serialize_footprint(footprint) for footprint in footprints[:limit]],
+            "footprints": [serialize_footprint(footprint, board) for footprint in footprints[:limit]],
         }
 
     def _find_footprints(
@@ -1198,7 +1225,7 @@ class KiCadIpcClient:
 
         matches = []
         for footprint in board.get_footprints():
-            serialized = serialize_footprint(footprint)
+            serialized = serialize_footprint(footprint, board)
             serialized_reference = str(serialized["reference"]).lower()
             serialized_value = str(serialized["value"]).lower()
             serialized_id = str(serialized["id"]).lower()
@@ -2079,6 +2106,42 @@ class KiCadIpcClient:
             },
         )
 
+    def _flip_footprint(
+        self,
+        board: Any,
+        *,
+        reference: str | None,
+        footprint_id: str | None,
+        target_layer: int | str | None,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        footprint = resolve_footprint(board, reference=reference, footprint_id=footprint_id)
+        current_layer = getattr(footprint, "layer", None)
+        resolved_target_layer = self._resolve_target_footprint_layer(
+            board,
+            current_layer=current_layer,
+            target_layer=target_layer,
+            item_label="Footprint",
+        )
+        did_flip = current_layer != resolved_target_layer
+
+        return self._update_footprint(
+            board,
+            reference=reference,
+            footprint_id=footprint_id,
+            dry_run=dry_run,
+            mutate=lambda updated_footprint: self._apply_footprint_side_flip(
+                board,
+                updated_footprint,
+                target_layer=resolved_target_layer,
+            ),
+            details={
+                "previous_layer": serialize_layer(current_layer, board),
+                "target_layer": serialize_layer(resolved_target_layer, board),
+                "mirrored": did_flip,
+            },
+        )
+
     def _create_track_segments(
         self,
         board: Any,
@@ -2312,6 +2375,7 @@ class KiCadIpcClient:
                 "x_mm",
                 "y_mm",
                 "orientation_degrees",
+                "layer",
             },
             item_label=f"Item update {index}",
         )
@@ -2329,17 +2393,19 @@ class KiCadIpcClient:
                 f"Item update {index} must include both x_mm and y_mm for footprint moves."
             )
         has_orientation = "orientation_degrees" in update
-        if not has_position and not has_orientation:
+        has_layer = "layer" in update
+        if not has_position and not has_orientation and not has_layer:
             raise KiCadLookupError(
-                f"Item update {index} must include x_mm/y_mm and/or orientation_degrees."
+                f"Item update {index} must include x_mm/y_mm, orientation_degrees, and/or layer."
             )
 
         footprint = resolve_footprint(board, reference=reference, footprint_id=footprint_id)
-        previous_item = serialize_footprint(footprint)
+        previous_item = serialize_footprint(footprint, board)
         updated_footprint = self._clone_item(footprint)
         requested_changes: dict[str, Any] = {
             "position": None,
             "orientation_degrees": None,
+            "layer": None,
         }
 
         if has_position:
@@ -2358,6 +2424,28 @@ class KiCadIpcClient:
                 "x_mm": x_mm,
                 "y_mm": y_mm,
             }
+
+        resolved_layer = None
+        if has_layer:
+            raw_layer = update.get("layer")
+            if raw_layer is None:
+                raise KiCadLookupError(
+                    f"Item update {index} must include a non-empty layer for footprint layer changes."
+                )
+            resolved_layer = self._resolve_target_footprint_layer(
+                board,
+                current_layer=getattr(footprint, "layer", None),
+                target_layer=raw_layer,
+                item_label=f"Item update {index}",
+            )
+            requested_changes["layer"] = serialize_layer(resolved_layer, board)
+
+        if resolved_layer is not None:
+            self._apply_footprint_side_flip(
+                board,
+                updated_footprint,
+                target_layer=resolved_layer,
+            )
 
         if has_orientation:
             orientation_degrees = float(update["orientation_degrees"])
@@ -2847,7 +2935,7 @@ class KiCadIpcClient:
         details: dict[str, Any],
     ) -> dict[str, Any]:
         footprint = resolve_footprint(board, reference=reference, footprint_id=footprint_id)
-        previous_footprint = serialize_footprint(footprint)
+        previous_footprint = serialize_footprint(footprint, board)
         updated_footprint = self._clone_item(footprint)
         mutate(updated_footprint)
 
@@ -2876,9 +2964,551 @@ class KiCadIpcClient:
                 "footprint_id": footprint_id,
             },
             "previous_footprint": previous_footprint,
-            "footprint": serialize_footprint(applied_footprint),
+            "footprint": serialize_footprint(applied_footprint, board),
             **details,
         }
+
+    def _resolve_target_footprint_layer(
+        self,
+        board: Any,
+        *,
+        current_layer: int | None,
+        target_layer: int | str | None,
+        item_label: str,
+    ) -> int:
+        front_layer = resolve_layer_id(board, "F.Cu")
+        back_layer = resolve_layer_id(board, "B.Cu")
+        valid_layers = {front_layer, back_layer}
+
+        if current_layer not in valid_layers:
+            current_layer_info = serialize_layer(current_layer, board)
+            raise KiCadLookupError(
+                f"{item_label} must be on F.Cu or B.Cu to change board side. "
+                f"Current layer: {current_layer_info or current_layer!r}."
+            )
+
+        if target_layer is None:
+            return back_layer if current_layer == front_layer else front_layer
+
+        resolved_layer = resolve_layer_id(board, target_layer)
+        if resolved_layer not in valid_layers:
+            raise KiCadLookupError(
+                f"{item_label} layer changes only support F.Cu or B.Cu. "
+                f"Got {target_layer!r}."
+            )
+
+        return resolved_layer
+
+    def _apply_footprint_side_flip(
+        self,
+        board: Any,
+        footprint: Any,
+        *,
+        target_layer: int,
+    ) -> bool:
+        current_layer = getattr(footprint, "layer", None)
+        if current_layer == target_layer:
+            return False
+
+        anchor = getattr(footprint, "position", None)
+        if anchor is None or getattr(anchor, "x", None) is None or getattr(anchor, "y", None) is None:
+            raise KiCadCapabilityError(
+                "The target footprint does not expose a mutable anchor position."
+            )
+
+        current_orientation = getattr(footprint, "orientation", None)
+        if current_orientation is not None:
+            flipped_orientation = self._make_angle_like(
+                current_orientation,
+                -self._read_angle_degrees(current_orientation, item_label="Footprint orientation"),
+                normalize_180=True,
+            )
+            self._set_footprint_orientation_direct(footprint, flipped_orientation)
+
+        footprint.layer = target_layer
+        self._flip_footprint_fields(board, footprint, anchor)
+
+        definition = getattr(footprint, "definition", None)
+        if definition is None:
+            return True
+
+        for item in list(getattr(definition, "items", ()) or ()):
+            self._flip_footprint_child_item(board, item, anchor)
+
+        return True
+
+    def _flip_footprint_fields(self, board: Any, footprint: Any, anchor: Any) -> None:
+        for field_name in (
+            "reference_field",
+            "value_field",
+            "datasheet_field",
+            "description_field",
+        ):
+            field = getattr(footprint, field_name, None)
+            text_item = getattr(field, "text", None)
+            if text_item is None:
+                continue
+            self._flip_board_text_item(board, text_item, anchor)
+
+    def _flip_footprint_child_item(self, board: Any, item: Any, anchor: Any) -> None:
+        item_type_name = type(item).__name__
+
+        if item_type_name == "Field":
+            self._flip_board_text_item(board, getattr(item, "text", None), anchor)
+            return
+
+        if self._is_board_text_box_like(item):
+            self._flip_board_text_box_item(board, item, anchor)
+            return
+
+        if self._is_board_text_like(item):
+            self._flip_board_text_item(board, item, anchor)
+            return
+
+        if self._is_board_shape_like(item):
+            self._flip_board_shape(board, item, anchor)
+            return
+
+        if item_type_name == "BoardShape":
+            self._flip_board_shape(board, item, anchor)
+            return
+
+        if item_type_name == "Zone":
+            self._flip_zone(board, item, anchor)
+            return
+
+        if self._is_pad_like(item):
+            self._flip_pad(board, item, anchor)
+            return
+
+        if item_type_name == "Barcode":
+            self._flip_barcode(board, item, anchor)
+            return
+
+        if item_type_name == "ReferenceImage":
+            self._flip_reference_image(board, item, anchor)
+            return
+
+        if item_type_name == "Footprint3DModel":
+            return
+
+        raise KiCadCapabilityError(
+            "Footprint flipping is not implemented for "
+            f"{item_type_name}."
+        )
+
+    def _flip_pad(self, board: Any, pad: Any, anchor: Any) -> None:
+        position = getattr(pad, "position", None)
+        if position is None:
+            raise KiCadCapabilityError("Footprint pad items must expose a mutable position.")
+
+        pad.position = self._mirror_vector_horizontally(position, anchor)
+
+        padstack = getattr(pad, "padstack", None)
+        if padstack is None:
+            raise KiCadCapabilityError("Footprint pad items must expose a mutable padstack.")
+
+        self._flip_padstack(
+            board,
+            padstack,
+            local_origin=self._make_vector_like(position, 0, 0),
+        )
+
+    def _flip_padstack(self, board: Any, padstack: Any, *, local_origin: Any) -> None:
+        layers = list(getattr(padstack, "layers", ()) or ())
+        if layers:
+            padstack.layers = [self._flip_layer_id(board, layer) for layer in layers]
+
+        drill = getattr(padstack, "drill", None)
+        if drill is not None:
+            start_layer = getattr(drill, "start_layer", None)
+            if start_layer is not None:
+                drill.start_layer = self._flip_layer_id(board, start_layer)
+
+            end_layer = getattr(drill, "end_layer", None)
+            if end_layer is not None:
+                drill.end_layer = self._flip_layer_id(board, end_layer)
+
+        current_angle = getattr(padstack, "angle", None)
+        if current_angle is not None:
+            padstack.angle = self._make_angle_like(
+                current_angle,
+                180.0 - self._read_angle_degrees(current_angle, item_label="Pad orientation"),
+            )
+
+        for copper_layer in list(getattr(padstack, "copper_layers", ()) or ()):
+            copper_layer.layer = self._flip_layer_id(board, getattr(copper_layer, "layer", None))
+
+            offset = getattr(copper_layer, "offset", None)
+            if offset is not None:
+                copper_layer.offset = self._make_vector_like(offset, -int(offset.x), int(offset.y))
+
+            trapezoid_delta = getattr(copper_layer, "trapezoid_delta", None)
+            if trapezoid_delta is not None:
+                copper_layer.trapezoid_delta = self._make_vector_like(
+                    trapezoid_delta,
+                    -int(trapezoid_delta.x),
+                    int(trapezoid_delta.y),
+                )
+
+            chamfered_corners = getattr(copper_layer, "chamfered_corners", None)
+            if chamfered_corners is not None:
+                top_left = bool(getattr(chamfered_corners, "top_left", False))
+                top_right = bool(getattr(chamfered_corners, "top_right", False))
+                bottom_left = bool(getattr(chamfered_corners, "bottom_left", False))
+                bottom_right = bool(getattr(chamfered_corners, "bottom_right", False))
+                chamfered_corners.top_left = top_right
+                chamfered_corners.top_right = top_left
+                chamfered_corners.bottom_left = bottom_right
+                chamfered_corners.bottom_right = bottom_left
+
+            for custom_shape in list(getattr(copper_layer, "custom_shapes", ()) or ()):
+                self._flip_board_shape(board, custom_shape, local_origin)
+
+        self._swap_padstack_outer_layers(padstack)
+
+    def _swap_padstack_outer_layers(self, padstack: Any) -> None:
+        proto = getattr(padstack, "_proto", None)
+        if proto is None:
+            return
+
+        front_outer_layers = getattr(proto, "front_outer_layers", None)
+        back_outer_layers = getattr(proto, "back_outer_layers", None)
+        if front_outer_layers is None or back_outer_layers is None:
+            return
+
+        front_copy = front_outer_layers.__class__()
+        back_copy = back_outer_layers.__class__()
+        front_copy.CopyFrom(front_outer_layers)
+        back_copy.CopyFrom(back_outer_layers)
+        front_outer_layers.CopyFrom(back_copy)
+        back_outer_layers.CopyFrom(front_copy)
+
+    def _flip_board_text_item(self, board: Any, text_item: Any, anchor: Any) -> None:
+        if text_item is None:
+            return
+
+        position = getattr(text_item, "position", None)
+        if position is not None:
+            text_item.position = self._mirror_vector_horizontally(position, anchor)
+
+        current_layer = getattr(text_item, "layer", None)
+        flipped_layer = self._flip_layer_id(board, current_layer)
+        if current_layer is not None:
+            text_item.layer = flipped_layer
+
+        attributes = getattr(text_item, "attributes", None)
+        if attributes is None:
+            return
+
+        angle = getattr(attributes, "angle", None)
+        if angle is not None:
+            attributes.angle = self._normalize_degrees(-float(angle))
+
+        if flipped_layer != current_layer and hasattr(attributes, "mirrored"):
+            attributes.mirrored = not bool(getattr(attributes, "mirrored", False))
+
+    def _flip_board_text_box_item(self, board: Any, text_box: Any, anchor: Any) -> None:
+        top_left = getattr(text_box, "top_left", None)
+        bottom_right = getattr(text_box, "bottom_right", None)
+        if top_left is None or bottom_right is None:
+            raise KiCadCapabilityError(
+                "Footprint text boxes must expose mutable top_left and bottom_right corners."
+            )
+
+        mirrored_top_left = self._mirror_vector_horizontally(top_left, anchor)
+        mirrored_bottom_right = self._mirror_vector_horizontally(bottom_right, anchor)
+        left_x = min(int(mirrored_top_left.x), int(mirrored_bottom_right.x))
+        right_x = max(int(mirrored_top_left.x), int(mirrored_bottom_right.x))
+        top_y = min(int(mirrored_top_left.y), int(mirrored_bottom_right.y))
+        bottom_y = max(int(mirrored_top_left.y), int(mirrored_bottom_right.y))
+        text_box.top_left = self._make_vector_like(top_left, left_x, top_y)
+        text_box.bottom_right = self._make_vector_like(bottom_right, right_x, bottom_y)
+
+        current_layer = getattr(text_box, "layer", None)
+        flipped_layer = self._flip_layer_id(board, current_layer)
+        if current_layer is not None:
+            text_box.layer = flipped_layer
+
+        attributes = getattr(text_box, "attributes", None)
+        if attributes is None:
+            return
+
+        angle = getattr(attributes, "angle", None)
+        if angle is not None:
+            attributes.angle = self._normalize_degrees(-float(angle))
+
+        if flipped_layer != current_layer and hasattr(attributes, "mirrored"):
+            attributes.mirrored = not bool(getattr(attributes, "mirrored", False))
+
+    def _flip_board_shape(self, board: Any, shape: Any, anchor: Any) -> None:
+        shape = self._coerce_concrete_board_shape(shape)
+        current_layer = getattr(shape, "layer", None)
+        if current_layer is not None:
+            shape.layer = self._flip_layer_id(board, current_layer)
+
+        if hasattr(shape, "polygons"):
+            for polygon in list(getattr(shape, "polygons", ()) or ()):
+                self._flip_polygon_with_holes(polygon, anchor)
+            return
+
+        if hasattr(shape, "control1") and hasattr(shape, "control2"):
+            shape.start = self._mirror_vector_horizontally(shape.start, anchor)
+            shape.control1 = self._mirror_vector_horizontally(shape.control1, anchor)
+            shape.control2 = self._mirror_vector_horizontally(shape.control2, anchor)
+            shape.end = self._mirror_vector_horizontally(shape.end, anchor)
+            return
+
+        if hasattr(shape, "mid"):
+            shape.start = self._mirror_vector_horizontally(shape.start, anchor)
+            shape.mid = self._mirror_vector_horizontally(shape.mid, anchor)
+            shape.end = self._mirror_vector_horizontally(shape.end, anchor)
+            return
+
+        if hasattr(shape, "center") and hasattr(shape, "radius_point"):
+            shape.center = self._mirror_vector_horizontally(shape.center, anchor)
+            shape.radius_point = self._mirror_vector_horizontally(shape.radius_point, anchor)
+            return
+
+        if hasattr(shape, "top_left") and hasattr(shape, "bottom_right"):
+            mirrored_top_left = self._mirror_vector_horizontally(shape.top_left, anchor)
+            mirrored_bottom_right = self._mirror_vector_horizontally(shape.bottom_right, anchor)
+            left_x = min(int(mirrored_top_left.x), int(mirrored_bottom_right.x))
+            right_x = max(int(mirrored_top_left.x), int(mirrored_bottom_right.x))
+            top_y = min(int(mirrored_top_left.y), int(mirrored_bottom_right.y))
+            bottom_y = max(int(mirrored_top_left.y), int(mirrored_bottom_right.y))
+            shape.top_left = self._make_vector_like(shape.top_left, left_x, top_y)
+            shape.bottom_right = self._make_vector_like(shape.bottom_right, right_x, bottom_y)
+            return
+
+        if hasattr(shape, "start") and hasattr(shape, "end"):
+            shape.start = self._mirror_vector_horizontally(shape.start, anchor)
+            shape.end = self._mirror_vector_horizontally(shape.end, anchor)
+            return
+
+        raise KiCadCapabilityError(
+            f"Footprint graphic shape flipping is not implemented for {type(shape).__name__}."
+        )
+
+    def _coerce_concrete_board_shape(self, shape: Any) -> Any:
+        if callable(kipy_to_concrete_board_shape):
+            try:
+                concrete_shape = kipy_to_concrete_board_shape(shape)
+            except Exception:  # noqa: BLE001
+                concrete_shape = None
+            if concrete_shape is not None:
+                return concrete_shape
+
+        return shape
+
+    def _flip_zone(self, board: Any, zone: Any, anchor: Any) -> None:
+        layers = list(getattr(zone, "layers", ()) or ())
+        if layers:
+            zone.layers = [self._flip_layer_id(board, layer) for layer in layers]
+
+        outline = getattr(zone, "outline", None)
+        if outline is not None:
+            self._flip_polygon_with_holes(outline, anchor)
+
+        proto = getattr(zone, "_proto", None)
+        if proto is None:
+            return
+
+        for filled_polygon in getattr(proto, "filled_polygons", ()):
+            filled_polygon.layer = self._flip_layer_id(board, filled_polygon.layer)
+            if KiCadPolygonWithHoles is None:
+                continue
+            for polygon_proto in getattr(getattr(filled_polygon, "shapes", None), "polygons", ()):
+                self._flip_polygon_with_holes(
+                    KiCadPolygonWithHoles(proto_ref=polygon_proto),
+                    anchor,
+                )
+
+        for layer_properties in getattr(proto, "layer_properties", ()):
+            layer_properties.layer = self._flip_layer_id(board, layer_properties.layer)
+
+    def _flip_barcode(self, board: Any, barcode: Any, anchor: Any) -> None:
+        position = getattr(barcode, "position", None)
+        if position is not None:
+            barcode.position = self._mirror_vector_horizontally(position, anchor)
+
+        current_layer = getattr(barcode, "layer", None)
+        if current_layer is not None:
+            barcode.layer = self._flip_layer_id(board, current_layer)
+
+        current_orientation = getattr(barcode, "orientation", None)
+        if current_orientation is not None:
+            barcode.orientation = self._make_angle_like(
+                current_orientation,
+                -self._read_angle_degrees(current_orientation, item_label="Barcode orientation"),
+            )
+
+    def _flip_reference_image(self, board: Any, image: Any, anchor: Any) -> None:
+        position = getattr(image, "position", None)
+        if position is not None:
+            image.position = self._mirror_vector_horizontally(position, anchor)
+
+        current_layer = getattr(image, "layer", None)
+        if current_layer is not None:
+            image.layer = self._flip_layer_id(board, current_layer)
+
+        transform_origin_offset = getattr(image, "transform_origin_offset", None)
+        if transform_origin_offset is not None:
+            image.transform_origin_offset = self._make_vector_like(
+                transform_origin_offset,
+                -int(transform_origin_offset.x),
+                int(transform_origin_offset.y),
+            )
+
+    def _flip_polygon_with_holes(self, polygon: Any, anchor: Any) -> None:
+        outline = getattr(polygon, "outline", None)
+        if outline is not None:
+            self._flip_polyline_like(outline, anchor)
+
+        for hole in list(getattr(polygon, "holes", ()) or ()):
+            self._flip_polyline_like(hole, anchor)
+
+    def _flip_polyline_like(self, polyline: Any, anchor: Any) -> None:
+        nodes = getattr(polyline, "nodes", None)
+        if nodes is not None:
+            for node in list(nodes):
+                self._flip_polyline_node_like(node, anchor)
+            return
+
+        if isinstance(polyline, list):
+            for index, node in enumerate(list(polyline)):
+                if self._is_polyline_node_like(node):
+                    self._flip_polyline_node_like(node, anchor)
+                else:
+                    polyline[index] = self._mirror_vector_horizontally(node, anchor)
+            return
+
+        raise KiCadCapabilityError(
+            f"Footprint polygon flipping is not implemented for {type(polyline).__name__}."
+        )
+
+    def _flip_polyline_node_like(self, node: Any, anchor: Any) -> None:
+        has_point = bool(getattr(node, "has_point", False)) or hasattr(node, "point")
+        if has_point and getattr(node, "point", None) is not None:
+            node.point = self._mirror_vector_horizontally(node.point, anchor)
+            return
+
+        has_arc = bool(getattr(node, "has_arc", False)) or hasattr(node, "arc")
+        arc = getattr(node, "arc", None)
+        if has_arc and arc is not None:
+            arc.start = self._mirror_vector_horizontally(arc.start, anchor)
+            arc.mid = self._mirror_vector_horizontally(arc.mid, anchor)
+            arc.end = self._mirror_vector_horizontally(arc.end, anchor)
+            return
+
+        raise KiCadCapabilityError(
+            f"Footprint polygon node flipping is not implemented for {type(node).__name__}."
+        )
+
+    def _is_polyline_node_like(self, value: Any) -> bool:
+        return hasattr(value, "point") or hasattr(value, "arc") or hasattr(value, "has_point")
+
+    def _is_board_text_like(self, value: Any) -> bool:
+        return hasattr(value, "position") and hasattr(value, "attributes") and hasattr(value, "value")
+
+    def _is_board_text_box_like(self, value: Any) -> bool:
+        return hasattr(value, "top_left") and hasattr(value, "bottom_right") and hasattr(value, "attributes")
+
+    def _is_board_shape_like(self, value: Any) -> bool:
+        return any(
+            hasattr(value, attribute)
+            for attribute in ("polygons", "control1", "mid", "center", "top_left", "start")
+        ) and hasattr(value, "layer")
+
+    def _is_pad_like(self, value: Any) -> bool:
+        return hasattr(value, "padstack") and hasattr(value, "number") and hasattr(value, "position")
+
+    def _set_footprint_orientation_direct(self, footprint: Any, angle: Any) -> None:
+        proto = getattr(footprint, "_proto", None)
+        proto_orientation = getattr(proto, "orientation", None) if proto is not None else None
+        angle_proto = getattr(angle, "proto", None)
+        if proto_orientation is not None and angle_proto is not None:
+            proto_orientation.CopyFrom(angle_proto)
+            return
+
+        footprint.orientation = angle
+
+    def _flip_layer_id(self, board: Any, layer: Any) -> Any:
+        if layer is None:
+            return None
+
+        layer_info = serialize_layer(layer, board) or {}
+        layer_name = str(layer_info.get("name") or "").strip()
+        if not layer_name:
+            return layer
+
+        if layer_name.startswith("F."):
+            resolved_layer = self._resolve_layer_name_with_fallback(board, f"B.{layer_name[2:]}")
+            return layer if resolved_layer is None else resolved_layer
+
+        if layer_name.startswith("B."):
+            resolved_layer = self._resolve_layer_name_with_fallback(board, f"F.{layer_name[2:]}")
+            return layer if resolved_layer is None else resolved_layer
+
+        return layer
+
+    def _resolve_layer_name_with_fallback(self, board: Any, layer_name: str) -> int | None:
+        try:
+            return resolve_layer_id(board, layer_name)
+        except KiCadLookupError:
+            pass
+
+        get_layer_name = getattr(board, "get_layer_name", None)
+        if not callable(get_layer_name):
+            return None
+
+        normalized_layer_name = layer_name.strip().lower()
+        for layer_id in range(512):
+            try:
+                candidate_name = get_layer_name(layer_id)
+            except Exception:  # noqa: BLE001
+                continue
+
+            if str(candidate_name).strip().lower() == normalized_layer_name:
+                return layer_id
+
+        return None
+
+    def _mirror_vector_horizontally(self, current: Any, anchor: Any) -> Any:
+        if current is None:
+            raise KiCadCapabilityError("The target item does not expose a mutable position vector.")
+
+        anchor_x = getattr(anchor, "x", None)
+        current_x = getattr(current, "x", None)
+        current_y = getattr(current, "y", None)
+        if anchor_x is None or current_x is None or current_y is None:
+            raise KiCadCapabilityError(
+                "The target item does not expose the coordinates needed for mirroring."
+            )
+
+        mirrored_x = (2 * int(anchor_x)) - int(current_x)
+        return self._make_vector_like(current, mirrored_x, int(current_y))
+
+    def _read_angle_degrees(self, angle: Any, *, item_label: str) -> float:
+        degrees = getattr(angle, "degrees", None)
+        if degrees is None:
+            try:
+                return float(angle)
+            except Exception as exc:  # noqa: BLE001
+                raise KiCadCapabilityError(
+                    f"{item_label} does not expose a readable angle in degrees."
+                ) from exc
+
+        return float(degrees)
+
+    def _normalize_degrees(self, degrees: float) -> float:
+        while degrees < 0.0:
+            degrees += 360.0
+
+        while degrees >= 360.0:
+            degrees -= 360.0
+
+        return degrees
 
     def _clone_item(self, item: Any) -> Any:
         return self._clone_proto_wrapper(item)
@@ -2940,7 +3570,7 @@ class KiCadIpcClient:
                 f"Unable to construct a position value for {vector_type.__name__}."
             ) from exc
 
-    def _make_angle_like(self, current: Any, degrees: float) -> Any:
+    def _make_angle_like(self, current: Any, degrees: float, *, normalize_180: bool = False) -> Any:
         if current is None:
             raise KiCadCapabilityError(
                 "The target item does not expose a mutable orientation angle."
@@ -2958,9 +3588,16 @@ class KiCadIpcClient:
                     f"Unable to construct an orientation value for {angle_type.__name__}."
                 ) from exc
 
-        normalize = getattr(angle, "normalize", None)
+        normalize_name = "normalize180" if normalize_180 else "normalize"
+        normalize = getattr(angle, normalize_name, None)
         if callable(normalize):
             return normalize()
+
+        if not normalize_180:
+            fallback_normalize = getattr(angle, "normalize", None)
+            if callable(fallback_normalize):
+                return fallback_normalize()
+
         return angle
 
     def _as_item_sequence(self, value: Any) -> list[Any]:

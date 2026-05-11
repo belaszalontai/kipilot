@@ -163,7 +163,7 @@ async def kicad_get_stackup() -> dict[str, Any]:
 
 @mcp.tool()
 async def kicad_get_footprints(limit: int = 200) -> dict[str, Any]:
-    """Return placed footprint references and positions from the current PCB."""
+    """Return placed footprints with instance data and compact child-graphics layer summaries."""
 
     return await _run_client_tool("kicad_get_footprints", "get_footprints", limit)
 
@@ -177,7 +177,7 @@ async def kicad_find_footprints(
     area: dict[str, float] | None = None,
     limit: int = 200,
 ) -> dict[str, Any]:
-    """Find footprints by reference, ID, text query, layer, or area."""
+    """Find footprints by reference, ID, text query, layer, or area, including child-graphics summaries."""
 
     return await _run_client_tool(
         "kicad_find_footprints",
@@ -499,6 +499,27 @@ async def kicad_rotate_footprint(
         reference=reference,
         footprint_id=footprint_id,
         orientation_degrees=orientation_degrees,
+        dry_run=dry_run,
+        commit_message=commit_message,
+    )
+
+
+@mcp.tool()
+async def kicad_flip_footprint(
+    reference: str | None = None,
+    footprint_id: str | None = None,
+    target_layer: int | str | None = None,
+    dry_run: bool = False,
+    commit_message: str | None = None,
+) -> dict[str, Any]:
+    """Flip a footprint to the opposite copper side and return the updated child-graphics layer summary."""
+
+    return await _run_client_tool(
+        "kicad_flip_footprint",
+        "flip_footprint",
+        reference=reference,
+        footprint_id=footprint_id,
+        target_layer=target_layer,
         dry_run=dry_run,
         commit_message=commit_message,
     )
