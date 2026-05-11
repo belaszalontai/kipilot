@@ -8,6 +8,10 @@ KiPilot is a Python-based Model Context Protocol (MCP) server that connects MCP-
 
 The server runs over `stdio`, exposes board-aware MCP tools, and is designed for live KiCad PCB workflows where the user keeps full control of the GUI session.
 
+## Usage Videos
+
+Usage videos are available at [kipilot.org/galery.html](https://kipilot.org/galery.html).
+
 ## Documentation
 
 Public project documentation is available at [kipilot.org/docs.html](https://kipilot.org/docs.html).
