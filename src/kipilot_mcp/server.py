@@ -267,6 +267,8 @@ async def kicad_get_pads(
     layer: int | str | None = None,
     area: dict[str, float] | None = None,
     limit: int = 200,
+    reference: str | None = None,
+    footprint_id: str | None = None,
 ) -> dict[str, Any]:
     """Return board pads, with optional net, layer, and area filters."""
 
@@ -277,6 +279,8 @@ async def kicad_get_pads(
         layer,
         area,
         limit,
+        reference,
+        footprint_id,
     )
 
 
@@ -520,6 +524,33 @@ async def kicad_flip_footprint(
         reference=reference,
         footprint_id=footprint_id,
         target_layer=target_layer,
+        dry_run=dry_run,
+        commit_message=commit_message,
+    )
+
+
+@mcp.tool()
+async def kicad_update_footprint_pad_net(
+    net_name: str,
+    reference: str | None = None,
+    footprint_id: str | None = None,
+    pad_number: str | None = None,
+    pad_id: str | None = None,
+    expected_current_net_name: str | None = None,
+    dry_run: bool = False,
+    commit_message: str | None = None,
+) -> dict[str, Any]:
+    """Reassign one footprint pad to a different board net, with optional dry run."""
+
+    return await _run_client_tool(
+        "kicad_update_footprint_pad_net",
+        "update_footprint_pad_net",
+        net_name=net_name,
+        reference=reference,
+        footprint_id=footprint_id,
+        pad_number=pad_number,
+        pad_id=pad_id,
+        expected_current_net_name=expected_current_net_name,
         dry_run=dry_run,
         commit_message=commit_message,
     )

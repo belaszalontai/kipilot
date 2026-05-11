@@ -257,11 +257,21 @@ class KiCadIpcClient:
         layer: int | str | None = None,
         area: dict[str, float | int] | None = None,
         limit: int = 200,
+        reference: str | None = None,
+        footprint_id: str | None = None,
     ) -> dict[str, Any]:
         """Return pads from the current PCB, with optional net, layer, and area filters."""
 
         return await self._run_board_read(
-            lambda board: self._get_pads(board, net_name, layer, area, limit),
+            lambda board: self._get_pads(
+                board,
+                net_name,
+                layer,
+                area,
+                limit,
+                reference=reference,
+                footprint_id=footprint_id,
+            ),
             default_message="Unable to read board pads through the IPC API.",
         )
 
@@ -592,6 +602,37 @@ class KiCadIpcClient:
             ),
             default_message="Unable to flip the requested footprint through the IPC API.",
             mutation_name="flip_footprint",
+            dry_run=dry_run,
+            commit_message=commit_message,
+        )
+
+    async def update_footprint_pad_net(
+        self,
+        *,
+        net_name: str,
+        reference: str | None = None,
+        footprint_id: str | None = None,
+        pad_number: str | None = None,
+        pad_id: str | None = None,
+        expected_current_net_name: str | None = None,
+        dry_run: bool = False,
+        commit_message: str | None = None,
+    ) -> dict[str, Any]:
+        """Reassign one footprint pad to a different board net."""
+
+        return await self._run_board_write(
+            lambda board, is_dry_run: self._update_footprint_pad_net(
+                board,
+                reference=reference,
+                footprint_id=footprint_id,
+                pad_number=pad_number,
+                pad_id=pad_id,
+                net_name=net_name,
+                expected_current_net_name=expected_current_net_name,
+                dry_run=is_dry_run,
+            ),
+            default_message="Unable to update the requested footprint pad net through the IPC API.",
+            mutation_name="update_footprint_pad_net",
             dry_run=dry_run,
             commit_message=commit_message,
         )
@@ -1360,6 +1401,9 @@ class KiCadIpcClient:
         layer: int | str | None,
         area: dict[str, float | int] | None,
         limit: int,
+        *,
+        reference: str | None = None,
+        footprint_id: str | None = None,
     ) -> dict[str, Any]:
         get_pads = getattr(board, "get_pads", None)
         if not callable(get_pads):
@@ -1370,8 +1414,23 @@ class KiCadIpcClient:
         resolved_layer = resolve_layer_id(board, layer)
         resolved_net = resolve_net(board, net_name) if net_name else None
         area_filter = BoundingBoxFilter.from_query(area)
+        resolved_footprint = None
+        footprint_pad_ids: set[str] | None = None
+        if reference is not None or footprint_id is not None:
+            resolved_footprint = resolve_footprint(board, reference=reference, footprint_id=footprint_id)
+            footprint_pad_ids = {
+                serialize_identifier(getattr(pad, "id", "")).strip().lower()
+                for pad in self._iter_footprint_pads(resolved_footprint)
+                if serialize_identifier(getattr(pad, "id", "")).strip()
+            }
 
         pads = list(get_pads())
+        if footprint_pad_ids is not None:
+            pads = [
+                pad
+                for pad in pads
+                if serialize_identifier(getattr(pad, "id", "")).strip().lower() in footprint_pad_ids
+            ]
         if resolved_net is not None:
             target_name = str(getattr(resolved_net, "name", "")).strip().lower()
             pads = [
@@ -1396,8 +1455,13 @@ class KiCadIpcClient:
                 if resolved_layer is not None
                 else None,
                 "area": area_filter.to_query_dict() if area_filter is not None else None,
+                "reference": reference,
+                "footprint_id": footprint_id,
             },
-            "pads": [serialize_pad(pad, board) for pad in pads[:limit]],
+            "pads": [
+                serialize_pad(pad, board, parent_footprint=resolved_footprint)
+                for pad in pads[:limit]
+            ],
         }
 
     def _get_graphics(
@@ -2967,6 +3031,161 @@ class KiCadIpcClient:
             "footprint": serialize_footprint(applied_footprint, board),
             **details,
         }
+
+    def _update_footprint_pad_net(
+        self,
+        board: Any,
+        *,
+        reference: str | None,
+        footprint_id: str | None,
+        pad_number: str | None,
+        pad_id: str | None,
+        net_name: str,
+        expected_current_net_name: str | None,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        footprint = resolve_footprint(board, reference=reference, footprint_id=footprint_id)
+        previous_footprint = serialize_footprint(footprint, board)
+        previous_pad = self._resolve_footprint_pad(
+            footprint,
+            pad_number=pad_number,
+            pad_id=pad_id,
+            item_label="Footprint pad",
+        )
+        current_net_name = str(getattr(getattr(previous_pad, "net", None), "name", "")).strip()
+        if (
+            expected_current_net_name is not None
+            and current_net_name.strip().lower() != expected_current_net_name.strip().lower()
+        ):
+            raise KiCadLookupError(
+                "Footprint pad current net did not match the expected value. "
+                f"Expected {expected_current_net_name!r}, got {current_net_name!r}."
+            )
+
+        resolved_net = resolve_net(board, net_name)
+        updated_footprint = self._clone_item(footprint)
+        updated_pad = self._resolve_footprint_pad(
+            updated_footprint,
+            pad_number=pad_number,
+            pad_id=pad_id,
+            item_label="Updated footprint pad",
+        )
+        self._set_pad_net(updated_pad, resolved_net)
+
+        applied_footprint = updated_footprint
+        if not dry_run:
+            update_items = getattr(board, "update_items", None)
+            if not callable(update_items):
+                raise KiCadCapabilityError("The active KiCad board does not expose update_items().")
+
+            try:
+                update_result = update_items([updated_footprint])
+            except TypeError:
+                update_result = update_items(updated_footprint)
+
+            resolved_items = self._as_item_sequence(update_result)
+            if resolved_items:
+                applied_footprint = resolved_items[0]
+
+        applied_pad = self._resolve_footprint_pad(
+            applied_footprint,
+            pad_number=pad_number,
+            pad_id=pad_id,
+            item_label="Applied footprint pad",
+        )
+        return {
+            "board": {
+                "name": getattr(board, "name", None),
+                "document": serialize_document(getattr(board, "document", None)),
+            },
+            "target": {
+                "reference": reference,
+                "footprint_id": footprint_id,
+                "pad_number": pad_number,
+                "pad_id": pad_id,
+            },
+            "previous_footprint": previous_footprint,
+            "footprint": serialize_footprint(applied_footprint, board),
+            "previous_pad": serialize_pad(previous_pad, board, parent_footprint=footprint),
+            "pad": serialize_pad(applied_pad, board, parent_footprint=applied_footprint),
+            "requested_changes": {
+                "net": serialize_net(resolved_net),
+                "expected_current_net_name": expected_current_net_name,
+            },
+        }
+
+    def _resolve_footprint_pad(
+        self,
+        footprint: Any,
+        *,
+        pad_number: str | None,
+        pad_id: str | None,
+        item_label: str,
+    ) -> Any:
+        normalized_number = str(pad_number).strip() if pad_number is not None else ""
+        normalized_id = str(pad_id).strip().lower() if pad_id is not None else ""
+        if not normalized_number and not normalized_id:
+            raise KiCadLookupError(
+                f"{item_label} lookup requires either pad_number or pad_id."
+            )
+
+        definition = getattr(footprint, "definition", None)
+        if definition is None:
+            raise KiCadLookupError(
+                f"{item_label} lookup is unavailable because the target footprint has no definition."
+            )
+
+        matches = []
+        for item in self._iter_footprint_pads(footprint):
+            current_id = serialize_identifier(getattr(item, "id", "")).strip().lower()
+            current_number = str(getattr(item, "number", "")).strip()
+            if normalized_id and current_id != normalized_id:
+                continue
+            if normalized_number and current_number != normalized_number:
+                continue
+            matches.append(item)
+
+        if not matches:
+            target = pad_id if normalized_id else pad_number
+            raise KiCadLookupError(
+                f"{item_label} {target!r} was not found on the target footprint."
+            )
+        if len(matches) > 1:
+            target = pad_id if normalized_id else pad_number
+            raise KiCadLookupError(
+                f"{item_label} lookup for {target!r} matched multiple pads; use pad_id to disambiguate."
+            )
+        return matches[0]
+
+    def _iter_footprint_pads(self, footprint: Any) -> list[Any]:
+        definition = getattr(footprint, "definition", None)
+        if definition is None:
+            return []
+
+        return [
+            item
+            for item in list(getattr(definition, "items", ()) or ())
+            if self._is_pad_like(item)
+        ]
+
+    def _set_pad_net(self, pad: Any, net: Any) -> None:
+        try:
+            pad.net = net
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+        proto = getattr(pad, "_proto", None)
+        if proto is None:
+            proto = getattr(pad, "proto", None)
+        proto_net = getattr(proto, "net", None) if proto is not None else None
+        net_proto = getattr(net, "proto", None)
+        copy_from = getattr(proto_net, "CopyFrom", None)
+        if callable(copy_from) and net_proto is not None:
+            copy_from(net_proto)
+            return
+
+        raise KiCadCapabilityError("Footprint pad items must expose a mutable net.")
 
     def _resolve_target_footprint_layer(
         self,

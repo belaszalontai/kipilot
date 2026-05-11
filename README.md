@@ -38,8 +38,8 @@ Implemented MCP surface includes:
 - Async-friendly KiCad IPC client wrapper around `kipy.KiCad`
 - Connectivity and version checks such as `ping_kicad` and `get_kicad_version`
 - Board and document inspection tools for open documents, outlines, stackup, footprints, nets, pads, tracks, vias, zones, graphics, text, origins, title blocks, and connectivity
-- Filtered lookup tools for footprints, nets, net classes, and connected items
-- Guarded mutation tools for visible layers, active layer, enabled layers, footprint move/rotate/flip, origins, title block fields, board text, track creation, via creation, item updates, track geometry, zone outlines, item deletion, zone refill, board revert, and board save
+- Filtered lookup tools for footprints, footprint-scoped pads, nets, net classes, and connected items
+- Guarded mutation tools for visible layers, active layer, enabled layers, footprint move/rotate/flip, footprint pad net reassignment, origins, title block fields, board text, track creation, via creation, item updates, track geometry, zone outlines, item deletion, zone refill, board revert, and board save
 - Unit tests for IPC connection and error-handling behavior
 
 Committed baseline:

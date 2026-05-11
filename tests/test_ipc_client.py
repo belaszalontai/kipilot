@@ -454,6 +454,8 @@ async def test_get_pads_supports_net_layer_and_area_filters() -> None:
                 "x_max_mm": 2.5,
                 "y_max_mm": 4.5,
             },
+            "reference": None,
+            "footprint_id": None,
         },
         "pads": [
             {
@@ -472,6 +474,94 @@ async def test_get_pads_supports_net_layer_and_area_filters() -> None:
                     {"id": 0, "name": "F.Cu"},
                 ],
             }
+        ],
+    }
+
+
+async def test_get_pads_supports_footprint_filters() -> None:
+    class FootprintPadBoard(FakeBoard):
+        def __init__(self) -> None:
+            self._footprints = [
+                FakeMutableFootprint(
+                    footprint_id="connector-id",
+                    reference="CON301",
+                    value="TerminalBlock_1x02",
+                    definition_items=[
+                        FakeMutablePad(pad_id="pad-a", number="1", net=FakeGroundNet()),
+                        FakeMutablePad(pad_id="pad-b", number="2", net=FakePowerNet()),
+                    ],
+                )
+            ]
+            self._pads = [
+                FakeMutablePad(pad_id="pad-a", number="1", net=FakeGroundNet()),
+                FakeMutablePad(pad_id="pad-b", number="2", net=FakePowerNet()),
+                FakeMutablePad(pad_id="pad-other", number="1", net=FakeGroundNet()),
+            ]
+
+        def get_footprints(self) -> list[FakeMutableFootprint]:
+            return list(self._footprints)
+
+        def get_pads(self) -> list[FakeMutablePad]:
+            return list(self._pads)
+
+        def get_nets(self) -> list[object]:
+            return [FakeGroundNet(), FakePowerNet()]
+
+    class FootprintPadKiCad(FakeBoardKiCad):
+        def __init__(self, **_kwargs: object) -> None:
+            self.board = FootprintPadBoard()
+
+        def get_board(self) -> FootprintPadBoard:
+            return self.board
+
+    client = KiCadIpcClient(KiCadIpcConfig(), kicad_factory=FootprintPadKiCad)
+
+    result = await client.get_pads(reference="CON301")
+
+    assert result == {
+        "ok": True,
+        "count": 2,
+        "limit": 200,
+        "query": {
+            "net_name": None,
+            "net": None,
+            "layer": None,
+            "resolved_layer": None,
+            "area": None,
+            "reference": "CON301",
+            "footprint_id": None,
+        },
+        "pads": [
+            {
+                "id": "pad-a",
+                "kind": "FakeMutablePad",
+                "number": "1",
+                "position": {
+                    "x_nm": 0,
+                    "y_nm": 0,
+                    "x_mm": 0.0,
+                    "y_mm": 0.0,
+                },
+                "net": {"name": "GND", "code": 1},
+                "pad_type": "thru_hole",
+                "layers": [{"id": 0, "name": "F.Cu"}],
+                "footprint": {"id": "connector-id", "reference": "CON301"},
+            },
+            {
+                "id": "pad-b",
+                "kind": "FakeMutablePad",
+                "number": "2",
+                "position": {
+                    "x_nm": 0,
+                    "y_nm": 0,
+                    "x_mm": 0.0,
+                    "y_mm": 0.0,
+                },
+                "net": {"name": "12V", "code": 12},
+                "pad_type": "thru_hole",
+                "layers": [{"id": 0, "name": "F.Cu"}],
+                "footprint": {"id": "connector-id", "reference": "CON301"},
+            },
         ],
     }
 
@@ -1831,6 +1921,197 @@ async def test_flip_footprint_updates_board_when_enabled() -> None:
     ]
 
 
+async def test_update_footprint_pad_net_dry_run_previews_pad_change() -> None:
+    class PadNetMutationBoard(FakeMutationBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self._footprints = [
+                FakeMutableFootprint(
+                    footprint_id="connector-id",
+                    reference="CON301",
+                    value="TerminalBlock_1x04",
+                    position=FakeVector(142_100_000, 28_100_000),
+                    orientation=FakeAngle(180),
+                    layer=0,
+                    definition_items=[
+                        FakeMutablePad(pad_id="pad-1", number="1", net=FakeGroundNet()),
+                        FakeMutablePad(pad_id="pad-2", number="2", net=FakeGroundNet()),
+                    ],
+                )
+            ]
+
+        def get_nets(self) -> list[object]:
+            return [FakeGroundNet(), FakePowerNet()]
+
+    class PadNetMutationKiCad(FakeBoardKiCad):
+        last_instance: PadNetMutationKiCad | None = None
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.board = PadNetMutationBoard()
+            type(self).last_instance = self
+
+        def get_board(self) -> PadNetMutationBoard:
+            return self.board
+
+    client = KiCadIpcClient(
+        KiCadIpcConfig(enable_mutations=False),
+        kicad_factory=PadNetMutationKiCad,
+    )
+
+    result = await client.update_footprint_pad_net(
+        reference="CON301",
+        pad_number="2",
+        net_name="12V",
+        expected_current_net_name="GND",
+        dry_run=True,
+    )
+
+    assert result == {
+        "ok": True,
+        "mutation": "update_footprint_pad_net",
+        "dry_run": True,
+        "commit_message": None,
+        "board": {
+            "name": "demo.kicad_pcb",
+            "document": {
+                "type": "1",
+                "board_filename": "demo.kicad_pcb",
+                "project": {
+                    "name": "demo",
+                    "path": "C:/demo/demo.kicad_pro",
+                },
+            },
+        },
+        "target": {
+            "reference": "CON301",
+            "footprint_id": None,
+            "pad_number": "2",
+            "pad_id": None,
+        },
+        "previous_footprint": {
+            "id": "connector-id",
+            "reference": "CON301",
+            "value": "TerminalBlock_1x04",
+            "position": {
+                "x_nm": 142_100_000,
+                "y_nm": 28_100_000,
+                "x_mm": 142.1,
+                "y_mm": 28.1,
+            },
+            "orientation": "180deg",
+            "layer": 0,
+            "locked": False,
+        },
+        "footprint": {
+            "id": "connector-id",
+            "reference": "CON301",
+            "value": "TerminalBlock_1x04",
+            "position": {
+                "x_nm": 142_100_000,
+                "y_nm": 28_100_000,
+                "x_mm": 142.1,
+                "y_mm": 28.1,
+            },
+            "orientation": "180deg",
+            "layer": 0,
+            "locked": False,
+        },
+        "previous_pad": {
+            "id": "pad-2",
+            "kind": "FakeMutablePad",
+            "number": "2",
+            "position": {
+                "x_nm": 0,
+                "y_nm": 0,
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+            },
+            "net": {"name": "GND", "code": 1},
+            "pad_type": "thru_hole",
+            "layers": [{"id": 0, "name": "F.Cu"}],
+            "footprint": {"id": "connector-id", "reference": "CON301"},
+        },
+        "pad": {
+            "id": "pad-2",
+            "kind": "FakeMutablePad",
+            "number": "2",
+            "position": {
+                "x_nm": 0,
+                "y_nm": 0,
+                "x_mm": 0.0,
+                "y_mm": 0.0,
+            },
+            "net": {"name": "12V", "code": 12},
+            "pad_type": "thru_hole",
+            "layers": [{"id": 0, "name": "F.Cu"}],
+            "footprint": {"id": "connector-id", "reference": "CON301"},
+        },
+        "requested_changes": {
+            "net": {"name": "12V", "code": 12},
+            "expected_current_net_name": "GND",
+        },
+    }
+    assert PadNetMutationKiCad.last_instance is not None
+    assert PadNetMutationKiCad.last_instance.board.calls == []
+
+
+async def test_update_footprint_pad_net_updates_board_when_enabled() -> None:
+    class PadNetMutationBoard(FakeMutationBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self._footprints = [
+                FakeMutableFootprint(
+                    footprint_id="connector-id",
+                    reference="CON301",
+                    value="TerminalBlock_1x04",
+                    position=FakeVector(142_100_000, 28_100_000),
+                    orientation=FakeAngle(180),
+                    layer=0,
+                    definition_items=[
+                        FakeMutablePad(pad_id="pad-1", number="1", net=FakeGroundNet()),
+                        FakeMutablePad(pad_id="pad-2", number="2", net=FakeGroundNet()),
+                    ],
+                )
+            ]
+
+        def get_nets(self) -> list[object]:
+            return [FakeGroundNet(), FakePowerNet()]
+
+    class PadNetMutationKiCad(FakeBoardKiCad):
+        last_instance: PadNetMutationKiCad | None = None
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.board = PadNetMutationBoard()
+            type(self).last_instance = self
+
+        def get_board(self) -> PadNetMutationBoard:
+            return self.board
+
+    client = KiCadIpcClient(
+        KiCadIpcConfig(enable_mutations=True),
+        kicad_factory=PadNetMutationKiCad,
+    )
+
+    result = await client.update_footprint_pad_net(
+        footprint_id="connector-id",
+        pad_number="2",
+        net_name="12V",
+        expected_current_net_name="GND",
+    )
+
+    assert result["ok"] is True
+    assert result["mutation"] == "update_footprint_pad_net"
+    assert result["dry_run"] is False
+    assert result["commit_message"] == "KiPilot MCP: update_footprint_pad_net"
+    assert result["pad"]["net"] == {"name": "12V", "code": 12}
+    assert PadNetMutationKiCad.last_instance is not None
+    assert PadNetMutationKiCad.last_instance.board.calls == [
+        ("begin_commit",),
+        ("update_items", ["connector-id"]),
+        ("push_commit", "fake-commit", "KiPilot MCP: update_footprint_pad_net"),
+    ]
+
+
 async def test_flip_footprint_supports_named_copper_layers_with_noncanonical_ids() -> None:
     class DynamicLayerMutationBoard(FakeMutationBoard):
         def __init__(self) -> None:
@@ -2959,6 +3240,11 @@ class FakeGroundNet:
     code = 1
 
 
+class FakePowerNet:
+    name = "12V"
+    code = 12
+
+
 class FakeProject:
     name = "demo"
     path = "C:/demo/demo.kicad_pro"
@@ -3648,6 +3934,44 @@ class FakeMutableVia:
         self.type = via_type
         self.locked = locked
         self.padstack = FakeViaPadStack()
+        self.proto = self
+
+
+class FakeMutablePadStack:
+    def __init__(self, proto: FakeMutablePadStack | None = None, *, layers: list[int] | None = None) -> None:
+        if proto is not None:
+            layers = list(getattr(proto, "layers", [0]))
+
+        self.layers = list(layers or [0])
+        self.proto = self
+
+
+class FakeMutablePad:
+    def __init__(
+        self,
+        proto: FakeMutablePad | None = None,
+        *,
+        pad_id: str = "pad-id",
+        number: str = "1",
+        position: FakeVector | None = None,
+        net: object | None = None,
+        pad_type: str = "thru_hole",
+        padstack: FakeMutablePadStack | None = None,
+    ) -> None:
+        if proto is not None:
+            pad_id = str(getattr(proto, "id", "pad-id"))
+            number = str(getattr(proto, "number", "1"))
+            position = _clone_vector(getattr(proto, "position", None))
+            net = getattr(proto, "net", None)
+            pad_type = str(getattr(proto, "pad_type", "thru_hole"))
+            padstack = FakeMutablePadStack(getattr(proto, "padstack", None))
+
+        self.id = pad_id
+        self.number = number
+        self.position = position or FakeVector(0, 0)
+        self.net = net
+        self.pad_type = pad_type
+        self.padstack = padstack or FakeMutablePadStack()
         self.proto = self
 
 

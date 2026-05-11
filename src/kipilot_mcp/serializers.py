@@ -476,7 +476,11 @@ def serialize_shape(shape: Any, board: Any | None = None) -> dict[str, Any]:
     return result
 
 
-def serialize_pad(pad: Any, board: Any | None = None) -> dict[str, Any]:
+def serialize_pad(
+    pad: Any,
+    board: Any | None = None,
+    parent_footprint: Any | None = None,
+) -> dict[str, Any]:
     padstack = getattr(pad, "padstack", None)
     layers = []
     if padstack is not None:
@@ -484,7 +488,7 @@ def serialize_pad(pad: Any, board: Any | None = None) -> dict[str, Any]:
             serialize_layer(layer, board) for layer in _as_sequence(getattr(padstack, "layers", []))
         ]
 
-    return {
+    result = {
         "id": serialize_identifier(getattr(pad, "id", "")),
         "kind": type(pad).__name__,
         "number": getattr(pad, "number", ""),
@@ -493,6 +497,14 @@ def serialize_pad(pad: Any, board: Any | None = None) -> dict[str, Any]:
         "pad_type": getattr(pad, "pad_type", None),
         "layers": layers,
     }
+
+    if parent_footprint is not None:
+        result["footprint"] = {
+            "id": serialize_identifier(getattr(parent_footprint, "id", "")),
+            "reference": field_text(getattr(parent_footprint, "reference_field", None)),
+        }
+
+    return result
 
 
 def serialize_identifier(value: Any) -> str:
